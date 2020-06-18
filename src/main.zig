@@ -9,16 +9,42 @@ const stdout = std.io.getStdOut();
 const stderr = std.io.getStdErr();
 
 // Todo make an arena
-const allocator = std.heap.page_allocator;
+const allocator = std.heap.c_allocator;
 //const allocator = std.heap.c_allocator;
 
+/// ArrayList doesn't have the right interface for a stream
+/// but no reason it can't be used as such
+/// this gives it the right interface
+fn arrayListWriterWrapper(wrapper: DynamicBufferWrapper, data: []const u8) anyerror!usize {
+    try wrapper.array.appendSlice(data);
+    return data.len;
+}
+
+/// A context has to be passed by value so it needs to
+/// be a pointer to the ArrayList
+const DynamicBufferWrapper = struct {
+    array: *std.ArrayList(u8),
+};
+
+const DynamicBufferWriter = std.io.Writer(
+    DynamicBufferWrapper,
+    anyerror,
+    arrayListWriterWrapper,
+);
+
 pub fn main() anyerror!void {
+    try util.initRandom();
     const aspect_ratio: f64 = 16.0 / 9.0;
     const image_width: i32 = 384;
     const image_height = @floatToInt(i32, (@intToFloat(f64, image_width) / aspect_ratio));
     const samples_per_pixel: i32 = 100;
 
     const outstream = stdout.outStream();
+    var intermediate_buffer = try std.ArrayList(u8).initCapacity(allocator, 1024 * 1024);
+    defer intermediate_buffer.deinit();
+    const wrapper = DynamicBufferWrapper{ .array = &intermediate_buffer };
+    var stream = DynamicBufferWriter{ .context = wrapper };
+
     try outstream.print("P3\n{} {}\n255\n", .{ image_width, image_height });
 
     var world = HitList.init(allocator);
@@ -47,13 +73,16 @@ pub fn main() anyerror!void {
                 _ = pixel_color.addEq(r_color);
             }
             try color.writeColorMultiSample(
-                outstream,
+                stream,
                 pixel_color,
                 samples_per_pixel,
             );
         }
     }
 
+    try stderr.outStream().print("\nWriting to file...\n", .{});
+
+    try outstream.writeAll(intermediate_buffer.items);
     try stderr.outStream().print("\nDone.\n", .{});
 }
 

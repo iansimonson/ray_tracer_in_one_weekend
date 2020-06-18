@@ -3,7 +3,7 @@ const vec3 = @import("vec3.zig");
 
 pub const Color = vec3.Vec3;
 
-pub fn writeColor(stream: std.fs.File.OutStream, pixel_color: Color) !void {
+pub fn writeColor(stream: var, pixel_color: Color) !void {
     var scaled: [3]i32 = undefined;
 
     for (pixel_color.points) |point, i| {
@@ -17,7 +17,7 @@ pub fn writeColor(stream: std.fs.File.OutStream, pixel_color: Color) !void {
     });
 }
 
-pub fn writeColorMultiSample(stream: std.fs.File.OutStream, pixel_color: Color, samples_per_pixel: i32) !void {
+pub fn writeColorMultiSample(stream: var, pixel_color: Color, samples_per_pixel: i32) !void {
     var pixel_copy = pixel_color;
 
     const scale = 1.0 / @intToFloat(f64, samples_per_pixel);
