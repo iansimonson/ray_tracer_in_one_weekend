@@ -21,9 +21,10 @@ pub fn writeColorMultiSample(stream: var, pixel_color: Color, samples_per_pixel:
     var pixel_copy = pixel_color;
 
     const scale = 1.0 / @intToFloat(f64, samples_per_pixel);
-    _ = pixel_copy.mulEq(scale);
-
+    // Assumes a gamma of 2...need to look up gamma correction to understand
+    // why we're doing this but it does the thing
     for (pixel_copy.points) |*point| {
+        point.* = std.math.sqrt(point.* * scale);
         point.* = std.math.clamp(point.*, 0, 1);
     }
 

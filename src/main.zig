@@ -2,7 +2,9 @@ const std = @import("std");
 const vec3 = @import("vec3.zig");
 const color = @import("color.zig");
 const rays = @import("ray.zig");
+const hits = @import("hit.zig");
 const util = @import("util.zig");
+const mat = @import("material.zig");
 const camera = @import("camera.zig");
 
 const stdout = std.io.getStdOut();
@@ -38,6 +40,7 @@ pub fn main() anyerror!void {
     const image_width: i32 = 384;
     const image_height = @floatToInt(i32, (@intToFloat(f64, image_width) / aspect_ratio));
     const samples_per_pixel: i32 = 100;
+    const max_depth: i32 = 50;
 
     const outstream = stdout.outStream();
     var intermediate_buffer = try std.ArrayList(u8).initCapacity(allocator, 1024 * 1024);
@@ -47,14 +50,39 @@ pub fn main() anyerror!void {
 
     try outstream.print("P3\n{} {}\n255\n", .{ image_width, image_height });
 
-    var world = HitList.init(allocator);
-    defer world.deinit();
-    var sphere = Sphere.init(vec3.Point3.init(0, 0, -1), 0.5);
-    var sphere_2 = Sphere.init(vec3.Point3.init(0, -100.5, -1), 100);
-    try world.add(&sphere.hittable);
-    try world.add(&sphere_2.hittable);
+    // materials
+    var lambertian = mat.Lambertian.init(color.Color.init(0.1, 0.2, 0.5));
+    var lambertian_2 = mat.Lambertian.init(color.Color.init(0.8, 0.8, 0));
+    var metal = mat.Metal.init(color.Color.init(0.8, 0.6, 0.2));
+    var metal_2 = mat.Metal.init(color.Color.init(0.8, 0.8, 0.8));
+    var glass = mat.Dielectric.init(1.5);
 
-    var cam = camera.Camera.init();
+    // objects
+    var sphere = Sphere.init(vec3.Point3.init(0, 0, -1), 0.5, &lambertian.material);
+    var ground_sphere = Sphere.init(vec3.Point3.init(0, -100.5, -1), 100, &lambertian_2.material);
+    var metal_sphere = Sphere.init(vec3.Point3.init(1, 0, -1), 0.5, &metal.material);
+    var metal_sphere_2 = Sphere.init(vec3.Point3.init(-1, 0, -1), -0.5, &glass.material);
+    var world = hits.HitList.init(allocator);
+    defer world.deinit();
+    try world.add(&sphere.hittable);
+    try world.add(&ground_sphere.hittable);
+    try world.add(&metal_sphere.hittable);
+    try world.add(&metal_sphere_2.hittable);
+
+    const look_from = vec3.Point3.init(3, 3, 2);
+    const look_at = vec3.Point3.init(0, 0, -1);
+    const vup = vec3.Vec3.init(0, 1, 0);
+    const dist_to_focus = look_from.sub(look_at).magnitude();
+    const aperature = 2.0;
+    var cam = camera.Camera.init(
+        look_from,
+        look_at,
+        vup,
+        20,
+        aspect_ratio,
+        aperature,
+        dist_to_focus,
+    );
 
     var j: i32 = image_height - 1;
     while (j >= 0) : (j -= 1) {
@@ -68,7 +96,7 @@ pub fn main() anyerror!void {
                 const v = color.normalizeColorFloat(@intToFloat(f64, j) + util.random(), image_height - 1);
 
                 const r = cam.getRay(u, v);
-                const r_color = rayColor(r, &world.hittable);
+                const r_color = rayColor(r, &world.hittable, max_depth);
 
                 _ = pixel_color.addEq(r_color);
             }
@@ -86,10 +114,19 @@ pub fn main() anyerror!void {
     try stderr.outStream().print("\nDone.\n", .{});
 }
 
-fn rayColor(ray: rays.Ray, world: *Hittable) color.Color {
-    var rec: HitRecord = undefined;
-    if (world.hit(ray, 0, util.infinity, &rec)) { // on the sphere
-        return rec.normal.add(color.Color.init(1, 1, 1)).mul(0.5);
+fn rayColor(ray: rays.Ray, world: *hits.Hittable, depth: i32) color.Color {
+    if (depth <= 0) {
+        return color.Color.init(0, 0, 0);
+    }
+    var rec: hits.HitRecord = undefined;
+    if (world.hit(ray, 0.001, util.infinity, &rec)) { // on the sphere
+        var scattered: rays.Ray = .{ .origin = vec3.Vec3.init(0, 0, 0), .direction = vec3.Vec3.init(0, 0, 0) };
+        var attenuation: color.Color = color.Color.init(0, 0, 0);
+        if (rec.material.scatter(ray, rec, &attenuation, &scattered)) {
+            const next_rc = rayColor(scattered, world, depth - 1);
+            return next_rc.componentwiseMul(attenuation);
+        }
+        return color.Color.init(0, 0, 0);
     } else { // off the sphere
         const unit_direction = ray.direction.unitVector();
         const t: f64 = 0.5 * (unit_direction.y() + 1.0);
@@ -105,44 +142,24 @@ fn rayColor(ray: rays.Ray, world: *Hittable) color.Color {
     }
 }
 
-const HitRecord = struct {
-    p: vec3.Point3,
-    normal: vec3.Vec3,
-    t: f64,
-    front_face: bool,
-
-    pub fn setFaceNormal(self: *@This(), ray: rays.Ray, outward_normal: vec3.Vec3) void {
-        self.front_face = ray.direction.dot(outward_normal) < 0;
-        self.normal = if (self.front_face) outward_normal else outward_normal.mul(-1);
-    }
-};
-
-const Hittable = struct {
-    hitFn: fn (*@This(), rays.Ray, f64, f64, *HitRecord) bool,
-    deinitFn: fn (*@This()) void = defaultDeinit,
-
-    pub fn hit(self: *@This(), ray: rays.Ray, t_min: f64, t_max: f64, hit_record: *HitRecord) bool {
-        return self.hitFn(self, ray, t_min, t_max, hit_record);
-    }
-
-    pub fn deinit(self: *@This()) void {
-        self.deinitFn(self);
-    }
-
-    fn defaultDeinit(self: *@This()) void {}
-};
-
 // Now we expand this
 const Sphere = struct {
     center: vec3.Point3,
     radius: f64,
-    hittable: Hittable,
+    hittable: hits.Hittable,
+    material: *mat.Material,
 
-    pub fn init(c: vec3.Point3, r: f64) @This() {
-        return .{ .center = c, .radius = r, .hittable = .{ .hitFn = hit } };
+    /// Does not own the material, just has a reference to it
+    pub fn init(c: vec3.Point3, r: f64, material: *mat.Material) @This() {
+        return .{
+            .center = c,
+            .radius = r,
+            .hittable = .{ .hitFn = hit },
+            .material = material,
+        };
     }
 
-    fn hit(hittable: *Hittable, ray: rays.Ray, t_min: f64, t_max: f64, hit_record: *HitRecord) bool {
+    fn hit(hittable: *hits.Hittable, ray: rays.Ray, t_min: f64, t_max: f64, hit_record: *hits.HitRecord) bool {
         const self = @fieldParentPtr(@This(), "hittable", hittable);
         const oc = ray.origin.sub(self.center);
         const a = ray.direction.dot(ray.direction);
@@ -160,6 +177,7 @@ const Sphere = struct {
                 hit_record.p = ray.at(hit_record.t);
                 const outward_normal = hit_record.p.sub(self.center).div(self.radius);
                 hit_record.setFaceNormal(ray, outward_normal);
+                hit_record.material = self.material;
                 return true;
             }
             // otherwise try the other root
@@ -169,72 +187,11 @@ const Sphere = struct {
                 hit_record.p = ray.at(hit_record.t);
                 const outward_normal = hit_record.p.sub(self.center).div(self.radius);
                 hit_record.setFaceNormal(ray, outward_normal);
+                hit_record.material = self.material;
                 return true;
             }
         }
 
         return false;
-    }
-};
-
-/// Owns the lifetime of the itmes added
-/// Will call deinit on each Hittable
-const HitList = struct {
-    alloc: *std.mem.Allocator,
-    items: std.ArrayList(*Hittable),
-    hittable: Hittable,
-
-    const ListType = std.ArrayList(*Hittable);
-
-    pub fn init(alloc: *std.mem.Allocator) @This() {
-        return .{
-            .alloc = alloc,
-            .items = ListType.init(alloc),
-            .hittable = .{
-                .hitFn = hit,
-                .deinitFn = virtDeinit,
-            },
-        };
-    }
-
-    pub fn deinit(self: *@This()) void {
-        for (self.items.items) |item| {
-            item.deinit();
-        }
-        self.items.deinit();
-    }
-
-    /// Takes ownership and will call `deinit`
-    pub fn add(self: *@This(), hittable: *Hittable) !void {
-        try self.items.append(hittable);
-    }
-
-    pub fn clear(self: *@This()) void {
-        for (self.items.items) |*item| {
-            item.deinit();
-        }
-        self.items.resize(0);
-    }
-
-    fn hit(hittable: *Hittable, ray: rays.Ray, t_min: f64, t_max: f64, hit_record: *HitRecord) bool {
-        const self = @fieldParentPtr(HitList, "hittable", hittable);
-        var temp_record: HitRecord = undefined;
-        var hit_anything: bool = false;
-        var closest: f64 = t_max;
-
-        for (self.items.items) |item| {
-            if (item.hit(ray, t_min, closest, &temp_record)) {
-                hit_anything = true;
-                closest = temp_record.t;
-                hit_record.* = temp_record;
-            }
-        }
-
-        return hit_anything;
-    }
-
-    fn virtDeinit(hittable: *Hittable) void {
-        const self = @fieldParentPtr(HitList, "hittable", hittable);
-        self.deinit();
     }
 };
