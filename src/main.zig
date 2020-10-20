@@ -195,3 +195,12 @@ const Sphere = struct {
         return false;
     }
 };
+
+fn random_scene() hits.HitList {
+    var world = hits.HitList.init(allocator);
+    const ground_material = mat.Lambertian.init(color.Color.init(0.5, 0.5, 0.5));
+    const ground_sphere = Sphere.init(vec3.Point3.init(0, -1000, 0), 1000, &ground_material.material);
+    world.add(ground_sphere.hittable);
+
+    return world;
+}
